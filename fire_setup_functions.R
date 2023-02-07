@@ -3,7 +3,7 @@
 
 
 #### functions to load data, define grid, produce time series etc ####
-fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers, landfire_names, landfire_types, landfire_evt_layer, biomass_data, cell_width = 500, EPSGlonlat  = 4326, EPSGUTM = 5070,   w = 2,  h= 3 ){
+fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers, landfire_names, landfire_types, landfire_evt_layer, biomass_data, cell_width = 500, EPSGlonlat  = 4326, EPSGUTM = 5070,   w = 4,  h= 5 ){
 
   print("Loading and re-formatting data.")
 
@@ -19,13 +19,14 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   num_times <- length(time_stamps)
   #print(num_times)
   
-  time_stamps_am <- unique(detecs_frp$time[detecs_frp$hour == 0])
-  time_stamps_pm <- unique(detecs_frp$time[detecs_frp$hour == 12])
+  time_stamps_am <- unique(detecs_frp$time[detecs_frp$ampm == "AM"])
+  time_stamps_pm <- unique(detecs_frp$time[detecs_frp$ampm == "PM"])
   
   
   ### adding grid to data 
   final_perim_utm <- detecs_line$geom2[nrow(detecs_line)]
   detecs_grid_utm <-  st_make_grid(detecs_line$geom2 , cellsize = 500, square = T,  crs = st_crs(detecs_line$geom2))
+  detecs_grid_utm <- detecs_grid_utm %>% st_as_sf( crs = EPSGUTM) %>%  st_cast("POLYGON") 
   
   ### buff perimeter 
   buffed_perim_utm <- st_buffer(final_perim_utm, 500)
@@ -38,14 +39,15 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   
   
   ### begin by filtering the grid by points that are within the final fire perimeter 
-  detecs_grid_utm <- detecs_grid_utm[st_intersects(detecs_grid_utm, final_perim_utm, sparse =F)]
+  detecs_grid_utm <- detecs_grid_utm[st_intersects(detecs_grid_utm, final_perim_utm, sparse =F),]
+  detecs_grid_utm$id <- c(1:length(detecs_grid_utm$x))
   detecs_grid <- st_transform(detecs_grid_utm, crs = EPSGlonlat)
   
   print("Calculating FRP at each time point within each grid cell.")
   
   ### properties of grid through time loop 
   fire_grid_proponfire <- fire_grid_frp <- numeric()
-  num_cells <- length(detecs_grid)
+  num_cells <- length(detecs_grid$id)
   #num_cellsUTM <- length(detecs_grid_utm) #they are the same - this makes sense right??? 
 
   
@@ -53,8 +55,7 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   fire_mat_frp <- fire_mat_numpix <- fire_mat_indpix <- fire_mat_ds <- fire_mat_dt <- matrix(NA, ncol = num_cells, nrow = num_times )
   for (i in 1:num_cells){
     #want to do a vector of indicators for if fire was in that region, and mean FRP per grid cell by time 
-    temp_poly <- detecs_grid[[i]]
-    temp_poly <- st_polygon(list(temp_poly[[1]])) %>% st_sfc(crs = 4326)
+    temp_poly <- detecs_grid[i,]
     
     #want to move on if the grid cell has no fire at any point 
     if (sum(st_intersects(temp_poly, detecs_frp, sparse =F)) == 0 ){
@@ -236,7 +237,7 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   detecs_quadrant_grid_cells <- list()
   for (i in 1:num_quads){
     temp_list <- st_intersects(detecs_grid_utm, quad_polys[[i]], sparse = F) 
-    detecs_quadrant_grid_cells[[i]] <- c(1:num_cells)[temp_list]
+    detecs_quadrant_grid_cells[[i]] <- detecs_grid_utm[temp_list,]
   }
   
   #browser()
@@ -251,53 +252,61 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   ### load evt first, so can test if same length as other layers, then don't need to duplicate the find cell bit because this is what takes time 
   temp_evt_raster <-  raster(landfire_evt_layer )
   temp_evt_raster <- projectRaster(temp_evt_raster, crs=EPSGUTM, method = "ngb")
-  temp_evt_cropped <-  raster::mask(temp_evt_raster,buffed_perim_utm_poly)
+  temp_evt_cropped <-  raster::mask(temp_evt_raster,as_Spatial(final_perim_utm))
   evt_df  <- raster::as.data.frame(temp_evt_cropped , xy=TRUE , na.rm=T )
   colnames(evt_df)[3] <- "value"
   evt_df <- st_as_sf(evt_df, coords  = c("x", "y"), remove = F)
   evt_df <- evt_df %>% st_set_crs(EPSGUTM)
- 
+  ## only want to assign grid cell label once so will do this first with EVT layer and then just copy 
+  
 
+  ### make list of which pixels are within each quadrant so that can more easily search when doing 'find cell' 
+  pixel_quadrants_subset <- list()
+  for (i in 1:num_quads){
+    temp_list <- st_intersects(evt_df, quad_polys[[i]], sparse = F) 
+    pixel_quadrants_subset[[i]] <- evt_df[temp_list,]
+    #print(i)
+  }
+  
+  ##now want to apply find cell function / apply st_intersects for each of the 10 subsets
+  #Sys.time()
+  for (i in 1:num_quads){
+    temp_layer <-  pixel_quadrants_subset[[i]]
+    temp_fire_grid <- detecs_quadrant_grid_cells[[i]]
+    temp_layer$cell <- sapply(temp_layer$geometry, find_cell, polys =  temp_fire_grid)
+    print(i)
+    pixel_quadrants_subset[[i]] <- temp_layer 
+  }
+  #Sys.time()
+  evt_df <- do.call(rbind, pixel_quadrants_subset)
+  temp_obs_with_cell <- which(!is.na(evt_df$cell))
+  
   ### assign grid cell to each of the layers 
   landfire_list <- list()
   landfire_tifs_list <- list()
-  for (i in 1:num_layers){ ## starts in EPSG 9001 ??
+  for (i in 1:num_layers){ 
     temp_raster <- raster(landfire_layers, band = i )
     temp_raster <- projectRaster(temp_raster, crs=EPSGUTM, method = "ngb")
-    temp_cropped <-  raster::mask(temp_raster,buffed_perim_utm_poly)
+    temp_cropped <-  raster::mask(temp_raster,as_Spatial(final_perim_utm ))
     landfire_tifs_list[[i]] <- temp_cropped 
     landfire_list[[i]] <- raster::as.data.frame(temp_cropped , xy=TRUE , na.rm=T )
     colnames(landfire_list[[i]])[3] <- "value"
     landfire_list[[i]] <- st_as_sf(landfire_list[[i]], coords  = c("x", "y"), remove = F)
     landfire_list[[i]] <- landfire_list[[i]] %>% st_set_crs(EPSGUTM)
     ### add in this because we only want to use the find_cell function once because it takes a long time and then just copy it to the other layers. usually the landfire layers are mapped onto the same grid so we can just duplicate the cell variable 
-    if (i == 1 ){
-      #temp_vec <- load("temp_vec.RData")
-      temp_vec <-  sapply(landfire_list[[1]]$geometry, find_cell, polys = quad_polys_sf, quadrant_grid_cells = detecs_quadrant_grid_cells, grid_utm = detecs_grid_utm ,num_quads = num_quads)
-      landfire_list[[1]]$cell <- temp_vec
-
-      ## weird to do this in the middle of this loop but needed to do it while still had temp_vec defined and also before taking away rows without cells
-      if (length(temp_cropped) == length(temp_evt_cropped)){
-        evt_df$cell <- temp_vec
-        evt_df <- evt_df[!is.na(evt_df$cell),]
-      } else{
-        #evt_df$cell <- temp_vec
-        evt_df$cell <- sapply(evt_df$geometry, find_cell, polys = quad_polys_sf, quadrant_grid_cells = detecs_quadrant_grid_cells, grid_utm = detecs_grid_utm,num_quads = num_quads )
-        evt_df <- evt_df[!is.na(evt_df$cell),]
-      }
-      
-      temp_obs_with_cell <- which(!is.na(landfire_list[[1]]$cell))
-      landfire_list[[1]] <- landfire_list[[1]][temp_obs_with_cell,]
-
-    }  else {
-      landfire_list[[i]]$cell <- temp_vec
-      landfire_list[[i]] <- landfire_list[[i]][temp_obs_with_cell,]
+    if (sum(evt_df$x)  == sum(landfire_list[[i]]$x)){
+      landfire_list[[i]]$cell <- evt_df$cell 
+    } else{
+      #this shouldn't ever happen, I downloaded the data from landfire altogether so the points should be the same all the time . it will also take ages so really hope this doesn't happen 
+      print("Calculating grid cells for a second landfire layer. ")
+      landfire_list[[i]]$cell <- sapply(temp_cropped$geometry, find_cell, polys = detecs_grid_utm)
     }
+    #get rid of pixels not in any cell 
+    landfire_list[[i]] <- landfire_list[[i]][temp_obs_with_cell,]
   }
   names(landfire_list) <- landfire_names
-  temp_obs_with_cell <- which(!is.na(landfire_list[[1]]$cell))
-
-
+  evt_df <- evt_df[temp_obs_with_cell,]
+  
   num_lanfir_pixels <-  nrow(landfire_list[[1]])
   
   #browser()
@@ -342,7 +351,7 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
     num_categories <- c(num_categories, levs )
   }
   
-  ### define matrices for each of the landfire variables 
+  ### define matrices for each of the landfire variable summaries  
   fire_grid_evt <- matrix(NA, nrow= num_cells, ncol = nlevels(evt_df$label))
   fire_grid_layers <- vector("list" , length= (num_layers) )
   for (k in 1:num_layers){
@@ -350,8 +359,8 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
       fire_grid_layers[[k]] <- matrix(NA, nrow = num_cells, ncol = num_categories[k] )
       colnames( fire_grid_layers[[k]]) <- levels(landfire_list[[k]]$label)
     } else {
-      fire_grid_layers[[k]] <- matrix(NA, nrow = num_cells, ncol = 7 )
-      colnames(fire_grid_layers[[k]])  <- c("variance", "range", "min", "low_quart", "median", "upp_quart", "max")
+      fire_grid_layers[[k]] <- matrix(NA, nrow = num_cells, ncol = 8 )
+      colnames(fire_grid_layers[[k]])  <- c("mean", "variance", "range", "min", "low_quart", "median", "upp_quart", "max")
     }
   }
 
@@ -390,7 +399,8 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
       dat <- temp_dat[[lay_num]]$value
       
       #assign basic summary stats and 5 number summary to correct row of matrix 
-      fire_grid_layers[[lay_num]][i, ] <-  c(var(dat) , 
+      fire_grid_layers[[lay_num]][i, ] <-  c(mean(dat, na.rm=T), 
+                                                var(dat, na.rm=T) , 
                                                  diff(range(dat)), 
                                                  quantile(dat, c(0, 0.25, 0.5, 0.75, 1))) 
     }
@@ -414,17 +424,35 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
   #### load biomass layer (gpkg file ), crop so that we only have the bits within our final fire perimet 
   biomass <- st_read(biomass_data)
   biomass <- biomass[st_intersects(biomass, buffed_perim_utm_poly, sparse =F),]
-  
+  colnames(biomass)[3] <- "value"
   
   #### add grid cell to biomass layer 
-  biomass$cell <-  sapply(biomass$geom, find_cell, polys = quad_polys_sf, quadrant_grid_cells = detecs_quadrant_grid_cells, grid_utm = detecs_grid_utm,num_quads = num_quads)
+  ### make list of which pixels are within each quadrant so that can more easily search when doing 'find cell' 
+  biomass_quadrants_subset <- list()
+  for (i in 1:num_quads){
+    temp_list <- st_intersects(biomass, quad_polys[[i]], sparse = F) 
+    biomass_quadrants_subset[[i]] <- biomass[temp_list,]
+    #print(i)
+  }
+  
+  ##now want to apply find cell function / apply st_intersects for each of the 10 subsets
+  Sys.time()
+  for (i in 1:num_quads){
+    temp_layer <-  biomass_quadrants_subset[[i]]
+    temp_fire_grid <- detecs_quadrant_grid_cells[[i]]
+    temp_layer$cell <- sapply(temp_layer$geom, find_cell, polys =  temp_fire_grid)
+    print(i)
+    biomass_quadrants_subset[[i]] <- temp_layer 
+  }
+  Sys.time()
+  biomass <- do.call(rbind, biomass_quadrants_subset)
   biomass <- biomass[!is.na(biomass$cell), ] 
   #num_bio_pixels <-  nrow(biomass )
   
   print("Biomass loop through grid cells, making summaries")                                             
   
   #predefine matrix 
-  fire_grid_biomass <- matrix(NA, nrow= num_cells , ncol = 8 )
+  fire_grid_biomass <- matrix(NA, nrow= num_cells , ncol = 9 )
   
   #summarise biomass by grid cell 
   for  (i in 1:num_cells){
@@ -433,10 +461,11 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
     #only going to look at 2 or 3 of the quadrants at most which should really speed up the process 
     temp_dat <- biomass$value[biomass$cell == i ]
     
-    if (length(temp_dat) == 0 ) { fire_grid_biomass[i, ] <-  rep(NA, 8 ) ; next } 
+    if (length(temp_dat) == 0 ) { fire_grid_biomass[i, ] <-  rep(NA, 9 ) ; next } 
     
     #summarise biomass over the grid cell 
-    fire_grid_biomass[i, ] <-  c(var(temp_dat) , 
+    fire_grid_biomass[i, ] <-  c(mean(dat, na.rm=T),
+                                        var(temp_dat, na.rm=T) , 
                                         diff(range(temp_dat)), 
                                         sum(temp_dat),
                                         quantile(temp_dat, c(0, 0.25, 0.5, 0.75, 1))) 
@@ -448,7 +477,7 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
     }
     
   }
-  colnames(fire_grid_biomass)  <- c("variance", "range", "sum", "min", "low_quart", "median", "upp_quart", "max")
+  colnames(fire_grid_biomass)  <- c("mean" ,"variance", "range", "sum", "min", "low_quart", "median", "upp_quart", "max")
  
   
   ###
@@ -469,6 +498,7 @@ fire_summaries <- function(detecs_frp, detecs_line, num_times,  landfire_layers,
                  "evt_data" = evt_df, 
                  "grid_lf"  = fire_grid_layers , 
                  "grid_evt" = fire_grid_evt, 
+                 "grid_biom" = fire_grid_biomass,
                  "frp_plots" = plot_list , 
                  "landfire_plots" = plot_list )
 
@@ -525,29 +555,21 @@ frp_move_to_zero <- function(x, times = num_times, stamps = time_stamps ){
 }
 
 
+
+### find cell function #### 
+
+
 ### find_cell function 
-find_cell <- function(x, polys = quad_polys_sf , quadrant_grid_cells = detecs_quadrant_grid_cells, grid_utm = detecs_grid_utm ,num_quads = num_quads){
-  #cut area by 1/6 
-  #remember that x is a point and not a grid cell !!!! so can only be in 1 quadrant 
-  which_quad <- st_intersects( polys, x , sparse = F)
+find_cell <- function(x, polys){
   
-  if (sum(which_quad)== 0 ) { 
-    return(NA) ; next 
-  } else if (sum(which_quad)== 1 ){
-    temp_quad <- c(1:num_quads)[which_quad]
-    temp_cells <- quadrant_grid_cells[[temp_quad]]
-  
-    #look at the grid cells within this quadrant and ask which one has the given raster point in it 
-    temp_cell <- temp_cells[st_intersects( grid_utm[temp_cells] , x, sparse = F)]
-  }
-  
-  if (length(temp_cell )== 0 ) { 
-    return(NA)} 
-  else {
-    return(temp_cell)
+  ## find which grid cell the pixel is in, pull out the id 
+  which_cell <- st_intersects(x, polys$x, sparse=F) 
+  if (sum(which_cell) == 0 ) {
+    return(NA)
+  } else{
+    return(polys$id[which_cell])
   }
 }
-
 
 
 ### graphing functions 

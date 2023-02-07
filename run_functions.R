@@ -22,8 +22,8 @@ library(broom)
 library(raster)
 library(spData)
 #library(spDataLarge)
-setwd("/home/ics-home/Wildfires/FRP")
-
+#setwd("/home/ics-home/Wildfires/FRP")
+source("fire_setup_functions.R")
 
 # all_fire_path <- "Data/largefires_2020.gpkg"
 # all_fires <- st_read(all_fire_path, layer = "newfirepix")
@@ -81,7 +81,7 @@ for (year in years){
                           cell_width = 500, 
                           EPSGlonlat  = 4326, 
                           EPSGUTM = 5070,   
-                          w = 2,  h= 3)
+                          w = 4,  h= 5)
     save(temp_output, file = paste0("/home/ics-home/Wildfires/FRP/Output/fire_",year, "_", temp_fire_num, "_frp_info.RData"))
     print(paste0("Saved ", which(temp_fireids == id ), " out of ", temp_num_fires, " total fires in ", year))
   }
