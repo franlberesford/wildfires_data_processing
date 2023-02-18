@@ -3,9 +3,9 @@
 
 #gdal-config = "/R_libs/gdal-3.6.0.tar.gz"
 
-install.packages("rgdal", repos="http://R-Forge.R-project.org", lib = "~/R_libs")
+#install.packages("rgdal", repos="http://R-Forge.R-project.org", lib = "~/R_libs")
 
-install.packages("sf", lib = "/usr/bin/R/packages")
+install.packages("sf")
 install.packages("viridis")
 install.packages("st")
 install.packages("rgdal")
